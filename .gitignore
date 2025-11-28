@@ -1,4 +1,5 @@
 # package management
 .python-version
+.vscode
 uv.lock
 venv/

@@ -1,1 +1,1 @@
-# karpathy-lecture
+# Letcture Notes from https://www.youtube.com/@AndrejKarpathy

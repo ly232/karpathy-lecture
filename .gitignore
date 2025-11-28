@@ -1,0 +1,4 @@
+# package management
+.python-version
+uv.lock
+venv/

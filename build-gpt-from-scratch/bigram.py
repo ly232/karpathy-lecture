@@ -126,6 +126,20 @@ class MultiHeadAttention(nn.Module):
         return torch.cat([h(x) for h in self.heads], dim=-1)  # (B, T, num_heads * head_size)
 
 
+class FeedForward(nn.Module):
+    """A simple linear layer followed by a non-linearity."""
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class BigramLanguageModel(nn.Module):
     
     def __init__(self):
@@ -141,6 +155,8 @@ class BigramLanguageModel(nn.Module):
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         # self-attention
         self.sa_heads = MultiHeadAttention(4, n_embd//4)  # 4 heads of 8-dimensional self-attention
+        # final MLP layer
+        self.ffwd = FeedForward(n_embd)
         # to go from token embeddings to logits, we need another linear layer.
         self.lm_head = nn.Linear(n_embd, vocab_size)
         
@@ -152,6 +168,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = tok_emb + pos_emb  # leverage broadcast
         x = self.sa_heads(x)  # apply only one head attention.
+        x = self.ffwd(x)  # (B, T, C)
         logits = self.lm_head(x)  # (B, T, C), C=vocab_size
         
         # logits is one round of inference. we can then evaluate loss.

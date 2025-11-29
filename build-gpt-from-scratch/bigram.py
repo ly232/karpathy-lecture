@@ -1,3 +1,9 @@
+'''
+Example usage:
+
+python build-gpt-from-scratch/bigram.py
+'''
+
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -11,6 +17,7 @@ eval_interval = 300
 learning_rate = 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
+n_embd = 32
 #################
 
 torch.manual_seed(1337)
@@ -82,21 +89,34 @@ def estimate_loss():
 
 class BigramLanguageModel(nn.Module):
     
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a
         # lookup table.
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
-    
+        #
+        # Embidding is vocab_size by n_embd, not vocab_size by vocab_size,
+        # we want a layer of indirection, to get *token* embeddings, instead of
+        # *logit* embeddings.
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # positional encoding
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        # to go from token embeddings to logits, we need another linear layer.
+        self.lm_head = nn.Linear(n_embd, vocab_size)
+        
     def forward(self, idx, targets=None):
+        B, T = idx.shape
+
         # idx and targets are both (B, T) tensor of ints.
-        logits = self.token_embedding_table(idx)  # (B, T, C), C=num channels=vocab_size
+        tok_emb = self.token_embedding_table(idx)  # (B, T, C), C=num embeddings=n_embd
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
+        x = tok_emb + pos_emb  # leverage broadcast
+        logits = self.lm_head(x)  # (B, T, C), C=vocab_size
         
         # logits is one round of inference. we can then evaluate loss.
         # small quirk: pytorch wants channel dimension to come as 2nd dimension,
         # i.e. (B*T, C), not (B, T, C).
-        B, T, C = logits.shape
         if targets is not None:
+            B, T, C = logits.shape
             logits = logits.view(B*T, C)
             targets = targets.view(B*T)
             loss = F.cross_entropy(logits, targets)
@@ -108,7 +128,12 @@ class BigramLanguageModel(nn.Module):
         # idx is (B, T) array of indicies of the current context.
         for _ in range(max_new_tokens):
             # get the predictions
-            logits, _ = self(idx)
+            # 
+            # ATTN: idx[:, -block_size:], because for positional embedding, we
+            # only have a lookup table up to block_size, so for inference we
+            # must be consistent to have at most block_size tokens in the
+            # inference context window.
+            logits, _ = self(idx[:, -block_size:])
             # focus only on the last time step
             logits = logits[:, -1, :]  # becomes (B, C)
             # apply softmax to get probabilities
@@ -119,7 +144,7 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
         return idx
     
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel()
 m = model.to(device)
 
 # Now train the model.

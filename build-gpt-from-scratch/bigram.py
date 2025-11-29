@@ -120,10 +120,15 @@ class MultiHeadAttention(nn.Module):
         self.heads = nn.ModuleList([
             Head(head_size) for _ in range(num_heads)
         ])
+        # for residule propagation, at the end of multi-head attention, we need
+        # a projection to sum the residule and the multi-head attention output.
+        self.proj = nn.Linear(n_embd, n_embd)
 
     def forward(self, x):
         # Concat over channels dimension, which is last dimension.
-        return torch.cat([h(x) for h in self.heads], dim=-1)  # (B, T, num_heads * head_size)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)  # (B, T, num_heads * head_size)
+        out = self.proj(out)
+        return out
 
 
 class FeedForward(nn.Module):
@@ -132,12 +137,31 @@ class FeedForward(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, n_embd),
+            # times 4 to match the MLP in original attention paper.
+            nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
+            # projection layer for residual propagation.
+            nn.Linear(4 * n_embd, n_embd),
         )
 
     def forward(self, x):
         return self.net(x)
+
+
+class Block(nn.Module):
+    """Transformer block: communication (attn) then computation (ffwd)."""
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+
+    def forward(self, x):
+        # x + ... to implement residual block propagation.
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
+        return x
 
 
 class BigramLanguageModel(nn.Module):
@@ -153,10 +177,15 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         # positional encoding
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        # self-attention
-        self.sa_heads = MultiHeadAttention(4, n_embd//4)  # 4 heads of 8-dimensional self-attention
-        # final MLP layer
-        self.ffwd = FeedForward(n_embd)
+        # # self-attention
+        # self.sa_heads = MultiHeadAttention(4, n_embd//4)  # 4 heads of 8-dimensional self-attention
+        # # final MLP layer
+        # self.ffwd = FeedForward(n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+        )
         # to go from token embeddings to logits, we need another linear layer.
         self.lm_head = nn.Linear(n_embd, vocab_size)
         
@@ -167,8 +196,9 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B, T, C), C=num embeddings=n_embd
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = tok_emb + pos_emb  # leverage broadcast
-        x = self.sa_heads(x)  # apply only one head attention.
-        x = self.ffwd(x)  # (B, T, C)
+        # x = self.sa_heads(x)  # apply only one head attention.
+        # x = self.ffwd(x)  # (B, T, C)
+        x = self.blocks(x)
         logits = self.lm_head(x)  # (B, T, C), C=vocab_size
         
         # logits is one round of inference. we can then evaluate loss.

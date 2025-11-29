@@ -12,9 +12,9 @@ from torch.nn import functional as F
 # hyperparameters
 batch_size = 32
 block_size = 8
-max_iters = 3000
+max_iters = 5000
 eval_interval = 300
-learning_rate = 1e-2
+learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
@@ -87,6 +87,45 @@ def estimate_loss():
     model.train()  # enter training mode
     return out
 
+class Head(nn.Module):
+    """One head of self-attention."""
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        # tril is not a parameter of the pytorch module (i.e. should not be part
+        # of back propagation); pytorch convention is to stage under a buffer.
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x)  # (B, T, C)
+        q = self.query(x)  # (B, T, C)
+        # compute attention scores ("affinities")
+        wei = q @ k.transpose(-2, -1) * C**-0.5  # (B,T,C)@(B,C,T)->(B,T,T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
+        wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        # perform the weighted aggregation of the values
+        v = self.value(x)  # (B, T, C)
+        out = wei @ v  # (B,T,T)@(B,T,C) -> (B,T,C)
+        return out
+
+class MultiHeadAttention(nn.Module):
+    """Multile heads of self-attention in parallel."""
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([
+            Head(head_size) for _ in range(num_heads)
+        ])
+
+    def forward(self, x):
+        # Concat over channels dimension, which is last dimension.
+        return torch.cat([h(x) for h in self.heads], dim=-1)  # (B, T, num_heads * head_size)
+
+
 class BigramLanguageModel(nn.Module):
     
     def __init__(self):
@@ -100,6 +139,8 @@ class BigramLanguageModel(nn.Module):
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         # positional encoding
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        # self-attention
+        self.sa_heads = MultiHeadAttention(4, n_embd//4)  # 4 heads of 8-dimensional self-attention
         # to go from token embeddings to logits, we need another linear layer.
         self.lm_head = nn.Linear(n_embd, vocab_size)
         
@@ -110,6 +151,7 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embedding_table(idx)  # (B, T, C), C=num embeddings=n_embd
         pos_emb = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
         x = tok_emb + pos_emb  # leverage broadcast
+        x = self.sa_heads(x)  # apply only one head attention.
         logits = self.lm_head(x)  # (B, T, C), C=vocab_size
         
         # logits is one round of inference. we can then evaluate loss.

@@ -18,6 +18,7 @@ learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
+dropout = 0.2
 #################
 
 torch.manual_seed(1337)
@@ -99,6 +100,8 @@ class Head(nn.Module):
         # of back propagation); pytorch convention is to stage under a buffer.
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x)  # (B, T, C)
@@ -107,6 +110,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5  # (B,T,C)@(B,C,T)->(B,T,T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
+        wei = self.dropout(wei)
         # perform the weighted aggregation of the values
         v = self.value(x)  # (B, T, C)
         out = wei @ v  # (B,T,T)@(B,T,C) -> (B,T,C)
@@ -123,11 +127,13 @@ class MultiHeadAttention(nn.Module):
         # for residule propagation, at the end of multi-head attention, we need
         # a projection to sum the residule and the multi-head attention output.
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         # Concat over channels dimension, which is last dimension.
         out = torch.cat([h(x) for h in self.heads], dim=-1)  # (B, T, num_heads * head_size)
         out = self.proj(out)
+        out = self.dropout(out)
         return out
 
 
@@ -142,6 +148,7 @@ class FeedForward(nn.Module):
             nn.ReLU(),
             # projection layer for residual propagation.
             nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
         )
 
     def forward(self, x):
@@ -156,11 +163,13 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
         # x + ... to implement residual block propagation.
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
         return x
 
 
@@ -185,6 +194,7 @@ class BigramLanguageModel(nn.Module):
             Block(n_embd, n_head=4),
             Block(n_embd, n_head=4),
             Block(n_embd, n_head=4),
+            nn.LayerNorm(n_embd),
         )
         # to go from token embeddings to logits, we need another linear layer.
         self.lm_head = nn.Linear(n_embd, vocab_size)
